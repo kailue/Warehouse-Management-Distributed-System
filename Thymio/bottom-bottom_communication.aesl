@@ -1,0 +1,1061 @@
+<!DOCTYPE aesl-source>
+<network>
+
+
+<!--list of global events-->
+<event size="1" name="PickupItem"/>
+<event size="1" name="PickupDone"/>
+<event size="1" name="PutdownItem"/>
+<event size="1" name="PutdownDone"/>
+<event size="2" name="ReachedDestination"/>
+<event size="1" name="pair_run"/>
+<event size="6" name="NewTask"/>
+<event size="5" name="RequestHelp"/>
+<event size="7" name="AcceptHelp"/>
+<event size="2" name="Collision"/>
+<event size="5" name="ReplyHelpRequest"/>
+<event size="4" name="StatusUpdate"/>
+<event size="6" name="SpecialTask"/>
+<event size="1" name="FinishedAllTasks"/>
+<event size="2" name="AcceptedTask"/>
+
+
+<!--list of constants-->
+
+
+<!--show keywords state-->
+<keywords flag="true"/>
+
+
+<!--node thymio-II-->
+<node nodeId="62848" name="thymio-II"># Code for bottom robot (63)
+var self_num = 63
+var top_num = 97
+var pickup_now = -1
+var self_functionality = 0
+var tmp
+var i
+
+# variables for state
+var state[4] = [0,0,0,0]
+var new_state[4] = [0,0,0,0]
+
+# variables for location
+var direction = 2
+var direction_vecx[4] = [0,1,0,-1]
+var direction_vecy[4] = [1,0,-1,0]
+var coord[2] = [0,0]
+var dest[2] = [3,3]
+
+# task queue, contains max 5*(task_id, pickuploc[2], putdownloc[2])
+var task[6] # (task_id, pickuploc[2], putdownloc[2], num_items)
+var task_queue [5*5]
+var tq_size = 0 # used to store number of elements in queue
+
+# ask help
+var currently_requesting
+var help_at
+
+#################################################
+# Bottom-Top communication
+#################################################
+
+sub reached_dest
+	if pickup_now==1 then
+		pickup_now = 0
+		emit PickupItem top_num
+	elseif pickup_now==0 then
+		pickup_now = -2
+		emit PutdownItem top_num
+	end
+
+onevent PickupDone
+	if event.args[0] == top_num then
+		# update next destination
+		dest[0] = task_queue[3]
+		dest[1] = task_queue[4]
+		# move to next destination
+		pickup_now = 1
+		callsub go_dest
+		call leds.top(0,32,32)
+	end
+
+onevent PutdownDone
+	if event.args[0] == top_num then
+		callsub finish_task
+		if tq_size > 0 then
+			# update next destination
+			dest[0] = task_queue[1]
+			dest[1] = task_queue[2]
+			# move to next destination
+			callsub go_dest
+		else
+			# ask for new task while going to idle place
+			emit FinishedAllTasks self_num
+			callsub go_idle
+		end
+		call leds.top(0,0,0)
+	end
+#################################################
+# Tasksender / Monitoring node
+#################################################
+
+sub finish_task
+	tmp = 0
+	while tmp &lt; 4 do
+		task_queue[5*tmp] = task_queue[5*(tmp+1)]
+		task_queue[5*tmp +1] = task_queue[5*(tmp+1) +1]
+		task_queue[5*tmp +2] = task_queue[5*(tmp+1) +2]
+		task_queue[5*tmp +3] = task_queue[5*(tmp+1) +3]
+		task_queue[5*tmp +4] = task_queue[5*(tmp+1) +4]
+		tmp = tmp + 1
+	end
+	task_queue[5*4] = 0
+	task_queue[5*4 +1] = 0
+	task_queue[5*4 +2] = 0
+	task_queue[5*4 +3] = 0
+	task_queue[5*4 +4] = 0
+	tq_size = tq_size - 1
+
+onevent NewTask # &lt;------- will add to task queue
+	# add new task only if task queue is not full
+	if tq_size &lt; 5 then
+		task_queue[tq_size] = event.args[0]
+		task_queue[tq_size+1] = event.args[1]
+		task_queue[tq_size+2] = event.args[2]
+		task_queue[tq_size+3] = event.args[3]
+		task_queue[tq_size+4] = event.args[4]
+		tq_size = tq_size + 1
+		emit AcceptedTask [event.args[0], self_num]
+	end
+	if tq_size == 1 then
+		# start on the new task
+		pickup_now = 1
+		callsub go_dest
+		# call for help if needed
+	end
+
+# update monitoring node every second
+timer.period[0] = 1000
+# StatusUpdate: [robotID, current_taskID, current_location[2]]
+onevent timer0
+	emit StatusUpdate [self_num, task_queue[0], coord[0:1]]
+	
+# SpecialTask: (robotID, task_id, pickuploc[2], putdownloc[2])
+onevent SpecialTask
+	if event.args[0] == self_num then
+		task_queue[tq_size] = event.args[0]
+		task_queue[tq_size+1] = event.args[1]
+		task_queue[tq_size+2] = event.args[2]
+		task_queue[tq_size+3] = event.args[3]
+		task_queue[tq_size+4] = event.args[4]
+		tq_size = tq_size + 1
+	end
+	if tq_size == 1 then
+		# start on the new task
+		pickup_now = 1
+		callsub go_dest
+		# call for help if needed
+	end
+
+#################################################
+# Asking for help
+#################################################
+
+# helper receives requests for help
+# RequestHelp: [askerID, taskID, FunctionalityNeeded, PickupLoc[2], PutdownLoc[2]]
+onevent RequestHelp
+	if event.args[2] == self_functionality then
+		if tq_size &lt; 5 then
+			# send replyhelprequest [askerID, helperId, helperLoc[2], OwnLoad]
+			emit ReplyHelpRequest [event.args[0], self_num, coord[0:1], tq_size]
+		end
+	end
+
+# helper receives acceptance of help
+# AcceptHelp: [askerID, taskID, helperID, PickupLoc[2], PutdownLoc[2]]
+onevent AcceptHelp # &lt;------- will add to task queue
+	if event.args[2] == self_num then
+		if tq_size &lt; 5 then
+			task_queue[tq_size] = event.args[1]
+			task_queue[tq_size+1] = event.args[3]
+			task_queue[tq_size+2] = event.args[4]
+			task_queue[tq_size+3] = event.args[5]
+			task_queue[tq_size+4] = event.args[6]
+			tq_size = tq_size + 1
+		end
+		# call for help if needed
+	end
+
+# asker receives reply to help request
+# ReplyHelpRequest [askerID, helperId, helperLoc, OwnLoad]
+onevent ReplyHelpRequest
+	if  currently_requesting == 1 then
+		if event.args[0] == self_num then
+			# accept all [askerID, taskID, helperID, PickupLoc, PutdownLoc]
+			emit AcceptHelp [self_num, task_queue[0], event.args[1], task_queue[1:2], task_queue[3:4]]
+		end
+		currently_requesting = 0
+	end
+
+#################################################
+# Collision Mitigation
+#################################################
+
+timer0
+    # resume going to destination
+    callsub go_dest
+	timer.period[0] = -1
+
+
+# Collision: [collision location[2], senderID]
+onevent Collision
+	if coord[0] == event.args[0] and coord[1] == event.args[1] then
+		# priority to lover ID
+		if  self_num &lt; event.args[1] then
+			# continue moving
+            callsub go_dest
+		else
+			# wait here for 3s
+            timer.period[0] = 3000
+		end
+	end
+
+
+#################################################
+# Movement subroutines
+#################################################
+
+# subroutines for moving one unit
+sub turn_right # turn right
+	# update direction
+	direction = (direction + 1) % 4
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = 400
+		motor.right.target = 0
+		new_state[0] = 0
+		new_state[1] = 1
+		new_state[2] = 0
+		new_state[3] = 0
+		emit pair_run 3
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+sub turn_left # turn left
+	# update direction
+	direction = (direction - 1) % 4
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = 0
+		motor.right.target = 500
+		new_state[0] = 1
+		new_state[1] = 0
+		new_state[2] = 0
+		new_state[3] = 0
+		emit pair_run 4
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+sub go_forward # go forward
+	# update direction
+	direction = direction
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = 150
+		motor.right.target = 150
+		new_state[0] = 1
+		new_state[1] = 1
+		new_state[2] = 0
+		new_state[3] = 0
+		emit pair_run 11
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+sub go_backward # U turn and go backward
+	# update direction
+	direction = (direction + 2) % 4
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = -300
+		motor.right.target = 300
+		new_state[2] = 1
+		new_state[3] = 1
+		emit pair_run 14
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+
+# subroutines for moving around the field
+sub go_pickup # from idle zone go pick up stuff
+	# go straight forward (South) until border
+	while (coord[1]>0) do
+		callsub go_forward
+	end
+	# turn left (and pick stuff up)
+	callsub turn_left
+
+sub go_dest # go to drop off
+	# go fwd until x coord matches
+	while (coord[0]&lt;dest[0]) do
+		callsub go_forward
+	end
+	# turn left (enter the dest column)
+	callsub turn_left
+	# calculate diff in y, go fwd that many grids
+	while (coord[1]&lt;dest[1]) do
+		callsub go_forward
+	end
+
+sub go_idle # go to the idle zone
+	# go top until border
+	while (coord[1]&lt;4) do
+		callsub go_forward
+	end
+	# go left until border
+	callsub turn_left
+	while (coord[0]>0) do
+		callsub go_forward
+	end
+	callsub turn_left
+	# turn left
+
+#################################################
+# Line Follower
+#################################################
+# reset outputs
+call sound.system(-1)
+call leds.top(0,0,0)
+call leds.bottom.left(0,0,0)
+call leds.bottom.right(0,0,0)
+call leds.circle(0,0,0,0,0,0,0,0)
+
+# subroutine to display the current state
+sub display_state
+	call leds.circle(0,state[1]*32,0,state[3]*32,0,state[2]*32,0,state[0]*32)
+
+# pair_run {0,1} is to correct the direction
+onevent prox
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 0 and state[2] == 0 then
+			motor.left.target = 200
+			motor.right.target = 100
+			emit pair_run 0
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[1] == 0 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 100
+			motor.right.target = 200
+			emit pair_run 1
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 0 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 0
+			motor.right.target = 0
+			new_state[0] = 1
+			new_state[1] = 1
+			new_state[2] = 1
+			new_state[3] = 1
+			emit pair_run 2
+		end
+	end
+
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 1 and state[1] == 0 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 150
+			motor.right.target = 50
+			emit pair_run 5
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[0] == 0 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 50
+			motor.right.target = 150
+			emit pair_run 6
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 1 then
+			motor.left.target = 0
+			motor.right.target = 350
+			emit pair_run 7
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 350
+			motor.right.target = -100
+			emit pair_run 8
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[0] == 1 then
+			motor.left.target = 50
+			motor.right.target = 300
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			emit pair_run 9
+		end
+	end
+
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 250
+			motor.right.target = 50
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			emit pair_run 10
+		end
+	end
+
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 1 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			motor.left.target = 200
+			motor.right.target = 100
+			call leds.top(32,0,0)
+			emit pair_run 12
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[0] == 1 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			motor.left.target = 100
+			motor.right.target = 200
+			call leds.top(0,32,0)
+			emit pair_run 13
+		end
+	end
+
+	when prox.ground.delta[1] &lt;= 400 do
+		if state[2] == 1 and state[3] == 1 then
+			motor.left.target = 200
+			motor.right.target = 100
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			emit pair_run 15
+		end
+	end
+
+    # For Collision avoidance
+	when prox.horizontal[0] &lt;= 400 or prox.horizontal[1] &lt;= 400 or prox.horizontal[2] &lt;= 400 or prox.horizontal[3] &lt;= 400 or prox.horizontal[4] &lt;= 400 do
+			motor.left.target = 0
+			motor.right.target = 0
+			new_state[0] = 1
+			new_state[1] = 1
+			new_state[2] = 1
+			new_state[3] = 1
+            emit Collision coord[0:1], self_num
+		end
+	end
+
+	call math.copy(state, new_state)
+	callsub display_state
+
+
+
+
+</node>
+
+
+<!--node thymio-II-->
+<node nodeId="7293" name="thymio-II"># Code for top robot (97)
+
+var self_num = 97
+
+onevent PickupItem
+	if event.args[0] == self_num then
+		# close arms
+		motor.left.target = 100
+		motor.right.target = 100
+		call leds.top(0,32,0) # green
+		timer.period[0] = 1000
+	end
+
+onevent PutdownItem
+	if event.args[0] == self_num then
+		# open arms
+		motor.left.target = -100
+		motor.right.target = -100
+		call leds.top(0,0,32) # blue
+        timer.period[1] = 1000
+	end
+
+onevent timer0
+    motor.left.target = 0
+    motor.right.target = 0
+    call leds.top(0,0,0)
+	emit PickupDone self_num
+	timer.period[0] = -1
+
+onevent timer1
+    motor.left.target = 0
+    motor.right.target = 0
+    call leds.top(0,0,0)
+    emit PutdownDone self_num
+	timer.period[1] = -1
+
+onevent button.forward
+	emit ReachedDestination [102, 1]
+
+onevent button.backward
+	emit ReachedDestination [102, 0]</node>
+
+<!--node thymio-II-->
+<node nodeId="56833" name="thymio-II"># Code for bottom robot (81)
+var self_num = 81
+var top_num = 30
+var pickup_now = -1
+var self_functionality = 0
+var tmp
+var i
+
+# variables for state
+var state[4] = [0,0,0,0]
+var new_state[4] = [0,0,0,0]
+
+# variables for location
+var direction = 2
+var direction_vecx[4] = [0,1,0,-1]
+var direction_vecy[4] = [1,0,-1,0]
+var coord[2] = [0,0]
+var dest[2] = [3,3]
+
+# task queue, contains max 5*(task_id, pickuploc[2], putdownloc[2])
+var task[6] # (task_id, pickuploc[2], putdownloc[2], num_items)
+var task_queue [5*5]
+var tq_size = 0 # used to store number of elements in queue
+
+# ask help
+var currently_requesting
+var help_at
+
+#################################################
+# Bottom-Top communication
+#################################################
+
+sub reached_dest
+	if pickup_now==1 then
+		pickup_now = 0
+		emit PickupItem top_num
+	elseif pickup_now==0 then
+		pickup_now = -2
+		emit PutdownItem top_num
+	end
+
+onevent PickupDone
+	if event.args[0] == top_num then
+		# update next destination
+		dest[0] = task_queue[3]
+		dest[1] = task_queue[4]
+		# move to next destination
+		pickup_now = 1
+		callsub go_dest
+		call leds.top(0,32,32)
+	end
+
+onevent PutdownDone
+	if event.args[0] == top_num then
+		callsub finish_task
+		if tq_size > 0 then
+			# update next destination
+			dest[0] = task_queue[1]
+			dest[1] = task_queue[2]
+			# move to next destination
+			callsub go_dest
+		else
+			# ask for new task while going to idle place
+			emit FinishedAllTasks self_num
+			callsub go_idle
+		end
+		call leds.top(0,0,0)
+	end
+#################################################
+# Tasksender / Monitoring node
+#################################################
+
+sub finish_task
+	tmp = 0
+	while tmp &lt; 4 do
+		task_queue[5*tmp] = task_queue[5*(tmp+1)]
+		task_queue[5*tmp +1] = task_queue[5*(tmp+1) +1]
+		task_queue[5*tmp +2] = task_queue[5*(tmp+1) +2]
+		task_queue[5*tmp +3] = task_queue[5*(tmp+1) +3]
+		task_queue[5*tmp +4] = task_queue[5*(tmp+1) +4]
+		tmp = tmp + 1
+	end
+	task_queue[5*4] = 0
+	task_queue[5*4 +1] = 0
+	task_queue[5*4 +2] = 0
+	task_queue[5*4 +3] = 0
+	task_queue[5*4 +4] = 0
+	tq_size = tq_size - 1
+
+onevent NewTask # &lt;------- will add to task queue
+	# add new task only if task queue is not full
+	if tq_size &lt; 5 then
+		task_queue[tq_size] = event.args[0]
+		task_queue[tq_size+1] = event.args[1]
+		task_queue[tq_size+2] = event.args[2]
+		task_queue[tq_size+3] = event.args[3]
+		task_queue[tq_size+4] = event.args[4]
+		tq_size = tq_size + 1
+		emit AcceptedTask [event.args[0], self_num]
+	end
+	if tq_size == 1 then
+		# start on the new task
+		pickup_now = 1
+		callsub go_dest
+		# call for help if needed
+	end
+
+# update monitoring node every second
+timer.period[0] = 1000
+# StatusUpdate: [robotID, current_taskID, current_location[2]]
+onevent timer0
+	emit StatusUpdate [self_num, task_queue[0], coord[0:1]]
+	
+# SpecialTask: (robotID, task_id, pickuploc[2], putdownloc[2])
+onevent SpecialTask
+	if event.args[0] == self_num then
+		task_queue[tq_size] = event.args[0]
+		task_queue[tq_size+1] = event.args[1]
+		task_queue[tq_size+2] = event.args[2]
+		task_queue[tq_size+3] = event.args[3]
+		task_queue[tq_size+4] = event.args[4]
+		tq_size = tq_size + 1
+	end
+	if tq_size == 1 then
+		# start on the new task
+		pickup_now = 1
+		callsub go_dest
+		# call for help if needed
+	end
+
+#################################################
+# Asking for help
+#################################################
+
+# helper receives requests for help
+# RequestHelp: [askerID, taskID, FunctionalityNeeded, PickupLoc[2], PutdownLoc[2]]
+onevent RequestHelp
+	if event.args[2] == self_functionality then
+		if tq_size &lt; 5 then
+			# send replyhelprequest [askerID, helperId, helperLoc[2], OwnLoad]
+			emit ReplyHelpRequest [event.args[0], self_num, coord[0:1], tq_size]
+		end
+	end
+
+# helper receives acceptance of help
+# AcceptHelp: [askerID, taskID, helperID, PickupLoc[2], PutdownLoc[2]]
+onevent AcceptHelp # &lt;------- will add to task queue
+	if event.args[2] == self_num then
+		if tq_size &lt; 5 then
+			task_queue[tq_size] = event.args[1]
+			task_queue[tq_size+1] = event.args[3]
+			task_queue[tq_size+2] = event.args[4]
+			task_queue[tq_size+3] = event.args[5]
+			task_queue[tq_size+4] = event.args[6]
+			tq_size = tq_size + 1
+		end
+		# call for help if needed
+	end
+
+# asker receives reply to help request
+# ReplyHelpRequest [askerID, helperId, helperLoc, OwnLoad]
+onevent ReplyHelpRequest
+	if  currently_requesting == 1 then
+		if event.args[0] == self_num then
+			# accept all [askerID, taskID, helperID, PickupLoc, PutdownLoc]
+			emit AcceptHelp [self_num, task_queue[0], event.args[1], task_queue[1:2], task_queue[3:4]]
+		end
+		currently_requesting = 0
+	end
+
+#################################################
+# Collision Mitigation
+#################################################
+
+timer0
+    # resume going to destination
+    callsub go_dest
+	timer.period[0] = -1
+
+
+# Collision: [collision location[2], senderID]
+onevent Collision
+	if coord[0] == event.args[0] and coord[1] == event.args[1] then
+		# priority to lover ID
+		if  self_num &lt; event.args[1] then
+			# continue moving
+            callsub go_dest
+		else
+			# wait here for 3s
+            timer.period[0] = 3000
+		end
+	end
+
+
+#################################################
+# Movement subroutines
+#################################################
+
+# subroutines for moving one unit
+sub turn_right # turn right
+	# update direction
+	direction = (direction + 1) % 4
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = 400
+		motor.right.target = 0
+		new_state[0] = 0
+		new_state[1] = 1
+		new_state[2] = 0
+		new_state[3] = 0
+		emit pair_run 3
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+sub turn_left # turn left
+	# update direction
+	direction = (direction - 1) % 4
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = 0
+		motor.right.target = 500
+		new_state[0] = 1
+		new_state[1] = 0
+		new_state[2] = 0
+		new_state[3] = 0
+		emit pair_run 4
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+sub go_forward # go forward
+	# update direction
+	direction = direction
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = 150
+		motor.right.target = 150
+		new_state[0] = 1
+		new_state[1] = 1
+		new_state[2] = 0
+		new_state[3] = 0
+		emit pair_run 11
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+sub go_backward # U turn and go backward
+	# update direction
+	direction = (direction + 2) % 4
+	# update coordinate
+	coord[0] = coord[0] + direction_vecx[direction]
+	coord[1] = coord[1] + direction_vecy[direction]
+	# move
+	if state[0] == 1 and state[1] == 1 and state[2] == 1 and state[3] == 1 then
+		motor.left.target = -300
+		motor.right.target = 300
+		new_state[2] = 1
+		new_state[3] = 1
+		emit pair_run 14
+	end
+	# update states
+	call math.copy(state, new_state)
+	callsub display_state
+
+
+# subroutines for moving around the field
+sub go_pickup # from idle zone go pick up stuff
+	# go straight forward (South) until border
+	while (coord[1]>0) do
+		callsub go_forward
+	end
+	# turn left (and pick stuff up)
+	callsub turn_left
+
+sub go_dest # go to drop off
+	# go fwd until x coord matches
+	while (coord[0]&lt;dest[0]) do
+		callsub go_forward
+	end
+	# turn left (enter the dest column)
+	callsub turn_left
+	# calculate diff in y, go fwd that many grids
+	while (coord[1]&lt;dest[1]) do
+		callsub go_forward
+	end
+
+sub go_idle # go to the idle zone
+	# go top until border
+	while (coord[1]&lt;4) do
+		callsub go_forward
+	end
+	# go left until border
+	callsub turn_left
+	while (coord[0]>0) do
+		callsub go_forward
+	end
+	callsub turn_left
+	# turn left
+
+#################################################
+# Line Follower
+#################################################
+# reset outputs
+call sound.system(-1)
+call leds.top(0,0,0)
+call leds.bottom.left(0,0,0)
+call leds.bottom.right(0,0,0)
+call leds.circle(0,0,0,0,0,0,0,0)
+
+# subroutine to display the current state
+sub display_state
+	call leds.circle(0,state[1]*32,0,state[3]*32,0,state[2]*32,0,state[0]*32)
+
+# pair_run {0,1} is to correct the direction
+onevent prox
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 0 and state[2] == 0 then
+			motor.left.target = 200
+			motor.right.target = 100
+			emit pair_run 0
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[1] == 0 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 100
+			motor.right.target = 200
+			emit pair_run 1
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 0 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 0
+			motor.right.target = 0
+			new_state[0] = 1
+			new_state[1] = 1
+			new_state[2] = 1
+			new_state[3] = 1
+			emit pair_run 2
+		end
+	end
+
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 1 and state[1] == 0 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 150
+			motor.right.target = 50
+			emit pair_run 5
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[0] == 0 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 50
+			motor.right.target = 150
+			emit pair_run 6
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 1 then
+			motor.left.target = 0
+			motor.right.target = 350
+			emit pair_run 7
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 350
+			motor.right.target = -100
+			emit pair_run 8
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[0] == 1 then
+			motor.left.target = 50
+			motor.right.target = 300
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			emit pair_run 9
+		end
+	end
+
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 0 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			motor.left.target = 250
+			motor.right.target = 50
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			emit pair_run 10
+		end
+	end
+
+	when prox.ground.delta[0] >= 450 and prox.ground.delta[1] &lt;= 400 do
+		if state[0] == 1 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			motor.left.target = 200
+			motor.right.target = 100
+			call leds.top(32,0,0)
+			emit pair_run 12
+		end
+	end
+
+	when prox.ground.delta[0] &lt;= 400 and prox.ground.delta[1] >= 450 do
+		if state[0] == 1 and state[1] == 1 and state[2] == 0 and state[3] == 0 then
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			motor.left.target = 100
+			motor.right.target = 200
+			call leds.top(0,32,0)
+			emit pair_run 13
+		end
+	end
+
+	when prox.ground.delta[1] &lt;= 400 do
+		if state[2] == 1 and state[3] == 1 then
+			motor.left.target = 200
+			motor.right.target = 100
+			new_state[0] = 0
+			new_state[1] = 0
+			new_state[2] = 0
+			new_state[3] = 0
+			emit pair_run 15
+		end
+	end
+
+    # For Collision avoidance
+	when prox.horizontal[0] &lt;= 400 or prox.horizontal[1] &lt;= 400 or prox.horizontal[2] &lt;= 400 or prox.horizontal[3] &lt;= 400 or prox.horizontal[4] &lt;= 400 do
+			motor.left.target = 0
+			motor.right.target = 0
+			new_state[0] = 1
+			new_state[1] = 1
+			new_state[2] = 1
+			new_state[3] = 1
+            emit Collision coord[0:1], self_num
+		end
+	end
+
+	call math.copy(state, new_state)
+	callsub display_state
+
+
+
+
+</node>
+
+
+<!--node thymio-II-->
+<node nodeId="64621" name="thymio-II"># Code for top robot (30)
+
+var self_num = 30
+
+onevent PickupItem
+	if event.args[0] == self_num then
+		# close arms
+		motor.left.target = 100
+		motor.right.target = 100
+		call leds.top(0,32,0) # green
+		timer.period[0] = 1000
+	end
+
+onevent PutdownItem
+	if event.args[0] == self_num then
+		# open arms
+		motor.left.target = -100
+		motor.right.target = -100
+		call leds.top(0,0,32) # blue
+        timer.period[1] = 1000
+	end
+
+onevent timer0
+    motor.left.target = 0
+    motor.right.target = 0
+    call leds.top(0,0,0)
+	emit PickupDone self_num
+	timer.period[0] = -1
+
+onevent timer1
+    motor.left.target = 0
+    motor.right.target = 0
+    call leds.top(0,0,0)
+    emit PutdownDone self_num
+	timer.period[1] = -1
+
+onevent button.forward
+	emit ReachedDestination [102, 1]
+
+onevent button.backward
+	emit ReachedDestination [102, 0]</node>
+
+
+</network>

@@ -1,0 +1,94 @@
+<!DOCTYPE aesl-source>
+<network>
+
+
+<!--list of global events-->
+<event size="1" name="PickupItem"/>
+<event size="1" name="PickupDone"/>
+<event size="1" name="PutdownItem"/>
+<event size="1" name="PutdownDone"/>
+<event size="2" name="ReachedDestination"/>
+
+
+<!--list of constants-->
+
+
+<!--show keywords state-->
+<keywords flag="true"/>
+
+
+<!--node thymio-II-->
+<node nodeId="62848" name="thymio-II"># Code for bottom robot (63)
+
+var self_num = 63
+var top_num = 97
+var pickup_now = 1
+
+onevent ReachedDestination
+	if event.args[0] == top_num then
+		if event.args[1] == pickup_now then
+			emit PickupItem top_num
+		end
+		if event.args[1] != pickup_now then
+			emit PutdownItem top_num
+		end
+	end
+
+onevent PickupDone
+	if event.args[0] == top_num then
+		# move to destination
+		call leds.top(0,32,32)
+	end
+
+onevent PutdownDone
+	if event.args[0] == top_num then
+		# continue execution
+		call leds.top(0,0,0)
+	end</node>
+
+
+<!--node thymio-II-->
+<node nodeId="7293" name="thymio-II"># Code for top robot (97)
+
+var self_num = 97
+
+onevent PickupItem
+	if event.args[0] == self_num then
+		# close arms
+		motor.left.target = 100
+		motor.right.target = 100
+		call leds.top(0,32,0)
+		timer.period[0] = 1000
+	end
+
+onevent PutdownItem
+	if event.args[0] == self_num then
+		# open arms
+		motor.left.target = -100
+		motor.right.target = -100
+		call leds.top(0,0,32)
+        timer.period[1] = 1000
+	end
+
+onevent timer0
+    motor.left.target = 0
+    motor.right.target = 0
+    call leds.top(0,0,0)
+	emit PickupDone self_num
+	timer.period[0] = -1
+
+onevent timer1
+    motor.left.target = 0
+    motor.right.target = 0
+    call leds.top(0,0,0)
+    emit PutdownDone self_num
+	timer.period[1] = -1
+
+onevent button.forward
+	emit ReachedDestination [102, 1]
+
+onevent button.backward
+	emit ReachedDestination [102, 0]</node>
+
+
+</network>

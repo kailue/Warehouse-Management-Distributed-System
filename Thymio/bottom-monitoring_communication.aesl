@@ -1,0 +1,165 @@
+<!DOCTYPE aesl-source>
+<network>
+
+
+<!--list of global events-->
+<event size="1" name="PickupItem"/>
+<event size="1" name="PickupDone"/>
+<event size="1" name="PutdownItem"/>
+<event size="1" name="PutdownDone"/>
+<event size="2" name="ReachedDestination"/>
+<event size="1" name="pair_run"/>
+<event size="6" name="NewTask"/>
+<event size="5" name="RequestHelp"/>
+<event size="7" name="AcceptHelp"/>
+<event size="2" name="Collision"/>
+<event size="5" name="ReplyHelpRequest"/>
+<event size="4" name="StatusUpdate"/>
+<event size="6" name="SpecialTask"/>
+<event size="1" name="FinishedAllTasks"/>
+<event size="2" name="AcceptedTask"/>
+
+
+<!--list of constants-->
+
+
+<!--show keywords state-->
+<keywords flag="true"/>
+
+
+<!--node thymio-II-->
+<node nodeId="62848" name="thymio-II"># Code for bottom robot (63)
+
+var self_num = 63
+var monitor_num = 97
+var coord[] = [0,0]
+var all_tasks[5*5]
+
+# update every 1000ms
+timer.period[0] = 1000
+
+# StatusUpdate: [robotID, current_taskID, current_location[2]]
+onevent timer0
+	emit StatusUpdate [self_num, all_tasks[0], coord[0:1]]
+
+
+
+</node>
+
+
+<!--node thymio-II-->
+<node nodeId="51816" name="thymio-II"># Code for monitoring node (50)
+
+# variable to store all robotids
+var robotIDs[10]
+
+# statuses: [robotID, robot_taskID, robot_location[2]]
+var status[4]
+
+# variable to store all statuses (up to 10 robots)
+var all_status[10*4]
+
+# task: (task_id, pickuploc[2], putdownloc[2], num_items)
+# variable to store all tasks (up to 10 tasks); all_tasks: 10*task
+var all_tasks[10*6]
+var num_tasks = 0
+var idx_of_task
+var j
+var tmp
+
+var self_num = 97
+var num_robots = 0
+var idx_of_robotid
+var i
+
+#################################################
+# Robot Monitoring
+#################################################
+onevent StatusUpdate
+	# get idx of robotid
+	idx_of_robotid = -1
+	for i in 0:9 do
+		if robotIDs[i] == event.args[0] then
+			idx_of_robotid = i
+		end
+	end
+	
+	# add robotid if not known
+	if idx_of_robotid == -1 then
+		idx_of_robotid = num_robots
+		num_robots = num_robots + 1
+	end
+	
+	# add to all_status
+	all_status[idx_of_robotid] = event.args[0]
+	all_status[idx_of_robotid+1] = event.args[1]
+	all_status[idx_of_robotid+2] = event.args[2]
+	all_status[idx_of_robotid+3] = event.args[3]
+
+#################################################
+# Task Monitoring
+#################################################
+
+sub finish_task_at
+	# need to set tmp = idx of finished task at the caller side
+	while tmp < 9 do
+		all_tasks[6*tmp] = all_tasks[6*(tmp+1)]
+		all_tasks[6*tmp +1] = all_tasks[6*(tmp+1) +1]
+		all_tasks[6*tmp +2] = all_tasks[6*(tmp+2) +1]
+		all_tasks[6*tmp +3] = all_tasks[6*(tmp+3) +1]
+		all_tasks[6*tmp +4] = all_tasks[6*(tmp+4) +1]
+		all_tasks[6*tmp +5] = all_tasks[6*(tmp+5) +1]
+		tmp = tmp + 1
+	end
+	all_tasks[6*9] = 0
+	all_tasks[6*9 +1] = 0
+	all_tasks[6*9 +2] = 0
+	all_tasks[6*9 +3] = 0
+	all_tasks[6*9 +4] = 0
+	all_tasks[6*9 +5] = 0
+	num_tasks = num_tasks - 1
+
+onevent NewTask
+	if num_tasks < 10 then
+		all_tasks[6*num_tasks] = event.args[0]
+		all_tasks[6*num_tasks +1] = event.args[1]
+		all_tasks[6*num_tasks +2] = event.args[2]
+		all_tasks[6*num_tasks +3] = event.args[3]
+		all_tasks[6*num_tasks +4] = event.args[4]
+		all_tasks[6*num_tasks +5] = event.args[5]
+		num_tasks = num_tasks + 1
+	end
+
+# AcceptedTask: [taskID, robotID]
+onevent AcceptedTask
+	# get idx of task
+	idx_of_task = 0
+	for j in 0:9 do
+		if all_tasks[j*2] == event.args[0] then
+			idx_of_task = j
+		end
+	end
+	# decrement number of items left
+	all_tasks[idx_of_task+5] = all_tasks[idx_of_task+1] - 1
+	# finish task if all items are gone
+	if all_tasks[idx_of_task+5] <= 0 then
+		tmp = idx_of_task
+		callsub finish_task_at
+	end
+
+# FinishedAllTasks: [robotID]
+onevent FinishedAllTasks
+	if num_tasks > 0 then
+		emit SpecialTask all_tasks[0:5]
+		all_tasks[5] = all_tasks[5] - 1
+		# check if task is finished
+		if all_tasks[5] <= 0 then
+			tmp = 0
+			callsub finish_task_at
+		end
+	end
+
+</node>
+
+
+</network>
