@@ -745,47 +745,13 @@ onevent prox
 
 		if started == 1 then
 			# !! : initialization is in button.center block.
-
-			# callsub go_dest
-
-			if count == 0 then
-				callsub go_forward
-				count += 1
-			elseif count == 1 then
-				callsub	turn_left
-				count += 1
-			elseif count == 2 then
-				callsub go_forward
-				count += 1
-			elseif count == 3 then
-				callsub go_forward
-				count += 1
-			elseif count == 4 then
-				callsub turn_left
-				count += 1
-			elseif count == 5 then
-				callsub go_forward
-				count += 1
-			elseif count == 6 then
-				callsub turn_left
-				count += 1
-			elseif count == 7 then
-				callsub go_forward
-				count += 1
-			elseif count == 8 then
-				callsub go_forward
-				count += 1
-			elseif count == 9 then
-				count += 1
+			if task == 1 then
+				callsub go_pickup
+			elseif task == 2 then
+				callsub go_dest
+			elseif task == 3 then
+				callsub go_idle
 			end
-
-			# if task == 1 then
-			# 	callsub go_pickup
-			# elseif task == 2 then
-			# 	callsub go_dest
-			# elseif task == 3 then
-			# 	callsub go_idle
-			# end
 		end
 
 		#####################
